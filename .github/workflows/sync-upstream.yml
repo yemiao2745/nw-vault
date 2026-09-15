@@ -1,23 +1,27 @@
 # NodeWarden 上游自动同步（模板）
 #
-# 这个文件是模板，由 setup.mjs 渲染后提交进 fork 的 .github/workflows/sync-upstream.yml。
-# setup.mjs 替换三个占位符（提交进 fork 的那份里不会再留下占位符）：
-#   shuaiplus/nodewarden      ← nodewarden.config.json 的 github.upstream
-#   main        ← 固定 main
-#   ^v[0-9]+\.[0-9]+\.[0-9]+$   ← nodewarden.config.json 的 github.syncTagPattern
+# 这是模板，由 setup.mjs 渲染后提交进 fork 的 .github/workflows/sync-upstream.yml。
+# 占位符（提交进 fork 的那份里不会再留下占位符）：
+#   shuaiplus/nodewarden   ← nodewarden.config.json 的 github.upstream
+#   main     ← 固定 main
 #
-# 它做什么：每天拉一次上游，只跟随形如 v1.8.0 的发布标签，把标签合并进 fork 的 main 分支。
-# 合并产生新提交 → Cloudflare Workers Builds 收到 push → 自动重新构建部署。
+# 做什么：每天把上游 main 合并进 fork 的 main。合并产生新提交 → Cloudflare Workers Builds
+# 收到 push → 自动重新构建部署。
+#
+# 为什么跟 main 而不是跟发布标签：上游把安全修复和客户端兼容修复直接推进 main，
+# 发布标签经常落后很多提交（实测 v1.8.0 落后 main 23 个提交，其中包含 PostCSS 路径穿越
+# 修复、备份凭据泄漏修复、Bitwarden 客户端兼容修复）。上游仓库自己推荐的做法
+# （Sync fork → Update branch）跟的也是 main。
 #
 # 定时任务的坑：仓库连续约 60 天没有任何活动时，GitHub 会自动停用 schedule 触发器。
-# 恢复办法是在仓库 Actions 页面手动跑一次这个 workflow（workflow_dispatch），
-# 对仓库做任何一次 push 也会重置计时，所以这里同时保留 workflow_dispatch。
+# 恢复办法：在仓库 Actions 页面手动跑一次这个 workflow（workflow_dispatch），
+# 对仓库做任何一次 push 也会重置计时。
 
-name: Sync upstream NodeWarden tags
+name: Sync upstream main
 
 on:
   schedule:
-    # 每天 UTC 03:29（北京时间 11:29）。避免整点：0 分和 30 分最容易排队或被丢弃。
+    # 每天 UTC 03:29（北京时间 11:29）。避开整点：0 分和 30 分最容易排队或被丢弃。
     - cron: "29 3 * * *"
   workflow_dispatch:
 
@@ -46,28 +50,20 @@ jobs:
       - name: Sync with upstream
         run: |
           set -euo pipefail
-          # 这里必须是 merge，绝对不能用 force-reset / reset --hard 对齐到上游标签提交：
+          # 必须是 merge，不能用 reset --hard 对齐上游：
           # 本文件（.github/workflows/sync-upstream.yml）只存在于 fork 里，上游没有它，
           # 一旦强推对齐就把它自己删掉，自动同步随之静默失效。
           git remote add upstream https://github.com/shuaiplus/nodewarden.git
-          git fetch --tags --prune upstream
-          git fetch origin main
+          git fetch upstream main
 
-          latest="$(git tag -l --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
-          if [ -z "${latest}" ]; then
-            echo "上游没有匹配 ^v[0-9]+\.[0-9]+\.[0-9]+$ 的标签，本次不做任何事。"
-            exit 0
-          fi
-          echo "上游最新发布标签: ${latest}"
-
-          if git merge-base --is-ancestor "${latest}" HEAD; then
-            echo "${latest} 已在 fork 的 main 分支里，无需同步。"
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "已是上游最新，无需同步。"
             exit 0
           fi
 
-          git merge --no-edit "${latest}"
+          git merge --no-edit upstream/main
           git push origin "HEAD:main"
-          echo "已同步 ${latest} 到 main，Cloudflare Workers Builds 会自动开始构建。"
+          echo "已同步上游 main，Cloudflare Workers Builds 会自动开始构建。"
 
-      # 合并冲突时上面这步会以非 0 退出码失败（默认行为，故意不加自动冲突解决）：
-      # GitHub 会给你发通知，请自己打开仓库处理冲突后再让 workflow 重跑。
+      # 合并冲突时上面这步会以非 0 退出码失败（默认行为，故意不做自动冲突解决）：
+      # GitHub 会发通知给你，请自己打开仓库处理冲突后再让 workflow 重跑。
