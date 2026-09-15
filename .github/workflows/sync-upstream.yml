@@ -1,0 +1,73 @@
+# NodeWarden 上游自动同步（模板）
+#
+# 这个文件是模板，由 setup.mjs 渲染后提交进 fork 的 .github/workflows/sync-upstream.yml。
+# setup.mjs 替换三个占位符（提交进 fork 的那份里不会再留下占位符）：
+#   shuaiplus/nodewarden      ← nodewarden.config.json 的 github.upstream
+#   main        ← 固定 main
+#   ^v[0-9]+\.[0-9]+\.[0-9]+$   ← nodewarden.config.json 的 github.syncTagPattern
+#
+# 它做什么：每天拉一次上游，只跟随形如 v1.8.0 的发布标签，把标签合并进 fork 的 main 分支。
+# 合并产生新提交 → Cloudflare Workers Builds 收到 push → 自动重新构建部署。
+#
+# 定时任务的坑：仓库连续约 60 天没有任何活动时，GitHub 会自动停用 schedule 触发器。
+# 恢复办法是在仓库 Actions 页面手动跑一次这个 workflow（workflow_dispatch），
+# 对仓库做任何一次 push 也会重置计时，所以这里同时保留 workflow_dispatch。
+
+name: Sync upstream NodeWarden tags
+
+on:
+  schedule:
+    # 每天 UTC 03:29（北京时间 11:29）。避免整点：0 分和 30 分最容易排队或被丢弃。
+    - cron: "29 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork (main)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure bot identity
+        run: |
+          git config user.name "nodewarden-sync-bot"
+          git config user.email "nodewarden-sync-bot@users.noreply.github.com"
+
+      - name: Sync with upstream
+        run: |
+          set -euo pipefail
+          # 这里必须是 merge，绝对不能用 force-reset / reset --hard 对齐到上游标签提交：
+          # 本文件（.github/workflows/sync-upstream.yml）只存在于 fork 里，上游没有它，
+          # 一旦强推对齐就把它自己删掉，自动同步随之静默失效。
+          git remote add upstream https://github.com/shuaiplus/nodewarden.git
+          git fetch --tags --prune upstream
+          git fetch origin main
+
+          latest="$(git tag -l --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
+          if [ -z "${latest}" ]; then
+            echo "上游没有匹配 ^v[0-9]+\.[0-9]+\.[0-9]+$ 的标签，本次不做任何事。"
+            exit 0
+          fi
+          echo "上游最新发布标签: ${latest}"
+
+          if git merge-base --is-ancestor "${latest}" HEAD; then
+            echo "${latest} 已在 fork 的 main 分支里，无需同步。"
+            exit 0
+          fi
+
+          git merge --no-edit "${latest}"
+          git push origin "HEAD:main"
+          echo "已同步 ${latest} 到 main，Cloudflare Workers Builds 会自动开始构建。"
+
+      # 合并冲突时上面这步会以非 0 退出码失败（默认行为，故意不加自动冲突解决）：
+      # GitHub 会给你发通知，请自己打开仓库处理冲突后再让 workflow 重跑。
